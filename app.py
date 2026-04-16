@@ -14,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 import anthropic
 
 st.set_page_config(
-    page_title="Customer Segmentation",
+    page_title="MarketMinds AI",
     page_icon=":dart:",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -174,8 +174,8 @@ def fig_heatmap(segments: list[dict], feature_cols: list[str]) -> go.Figure:
 # ── sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("Customer Segmentation")
-    st.caption("K-means clustering + AI-powered personas")
+    st.title("MarketMinds AI")
+    st.caption("AI-powered customer segmentation with intelligent personas")
     st.divider()
 
     uploaded_file = st.file_uploader("Upload Customer CSV", type=["csv"])
@@ -192,7 +192,7 @@ with st.sidebar:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-st.title("Customer Segmentation")
+st.title("MarketMinds AI")
 
 if uploaded_file is None:
     st.info("Upload a CSV file in the sidebar to get started.")
@@ -307,7 +307,7 @@ else:
                         f"**Segment {seg['segment_id']}** &nbsp;·&nbsp; "
                         f"{seg['size']} customers ({seg['percentage']}%)"
                     )
-                    st.markdown(f"### {p.get('persona_name', f'Segment {seg[\"segment_id\"]}')}")
+                    st.markdown(f"### {p.get('persona_name', 'Segment ' + str(seg['segment_id']))}")
 
                     if "traits" in p:
                         st.markdown("**Traits:** " + " · ".join(p["traits"]))
