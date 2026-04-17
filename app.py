@@ -1,5 +1,6 @@
 import io
 import json
+import pathlib
 
 import numpy as np
 import pandas as pd
@@ -11,30 +12,11 @@ from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
-import anthropic
-
 st.set_page_config(
     page_title="MarketMinds AI",
     page_icon=":dart:",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-SYSTEM_PROMPT = (
-    "You are a marketing analyst expert specializing in customer segmentation and business strategy. "
-    "Analyze customer segment statistics and create detailed, actionable persona profiles tailored to "
-    "the business context provided.\n\n"
-    "For each segment provide:\n"
-    "1. segment_name: A memorable, descriptive name (e.g. 'The Value-Driven Young Professional')\n"
-    "2. demographics: age_range, income_level, and lifestyle (all strings)\n"
-    "3. psychographics: motivations (2-3 items), pain_points (2-3 items), values (2-3 items)\n"
-    "4. behavioral_patterns: 3-4 key behaviors derived from the segment data\n"
-    "5. marketing_channels: 3-4 specific channels suited to the stated marketing budget\n"
-    "6. messaging_strategy: A concise, targeted messaging approach (2-3 sentences)\n"
-    "7. predicted_clv: Exactly 'High', 'Medium', or 'Low' based on segment spending and engagement\n"
-    "8. campaign_recommendation: A specific, actionable campaign idea tied to the stated business goal (2-3 sentences)\n\n"
-    "Tailor all recommendations to the business type, goal, and budget in the user message. "
-    "Be specific and actionable, not generic."
 )
 
 COLORS = px.colors.qualitative.Set2
@@ -51,6 +33,16 @@ DEMO_NOTE = (
     "When you're ready, upload your own CSV to segment your actual customers."
 )
 
+PERSONAS_DIR = pathlib.Path(__file__).parent / "personas"
+
+PERSONA_FILE = {
+    "E-commerce Customers": "ecommerce.json",
+    "Small Business Customers": "small_business.json",
+    "Retail Store Customers": "retail.json",
+}
+
+CLV_BADGE = {"High": "🟢 High", "Medium": "🟡 Medium", "Low": "🔴 Low"}
+
 
 # ── synthetic data generators ─────────────────────────────────────────────────
 
@@ -62,7 +54,6 @@ def _ecommerce_data() -> pd.DataFrame:
         "avg_order_value", "days_since_last_purchase", "email_engagement_score",
         "website_visits_per_month",
     ]
-    # 4 clusters: young deal-seekers, affluent occasionals, mid-market regulars, senior premium
     cluster_defs = [
         (550, [24, 35000,  800, 18,  44, 15, 72, 25], [4, 8000,  300, 5,  15,  8, 15, 8]),
         (400, [47, 120000, 4200, 6,  700, 45, 45,  8], [8, 25000, 1200, 2, 200, 20, 18, 4]),
@@ -92,7 +83,6 @@ def _small_business_data() -> pd.DataFrame:
         "age", "annual_income", "purchase_frequency", "satisfaction_score",
         "lifetime_value", "referral_count", "years_as_customer", "monthly_spend",
     ]
-    # 4 clusters: new clients, champion loyalists, big-spend low-engagement, satisfied & thrifty
     cluster_defs = [
         (600, [32, 55000,   4, 7.0,  3000, 1, 1.2,  250], [5, 10000, 2, 1.2, 1000, 1, 0.5,  100]),
         (450, [45, 95000,  12, 9.2, 42000, 6, 8.0, 3500], [7, 20000, 3, 0.5, 8000, 2, 2.0,  800]),
@@ -123,7 +113,6 @@ def _retail_data() -> pd.DataFrame:
         "seasonal_shopper_score", "category_preference_score", "store_visits_per_year",
         "avg_spend_per_visit",
     ]
-    # 4 clusters: frequent light shoppers, weekend bulk buyers, loyal regulars, seasonal occasionals
     cluster_defs = [
         (600, [28, 12,  25,  800, 3, 6, 140,  25], [5, 4,  8, 300, 1.5, 1.5, 30,  8]),
         (450, [42,  3, 120, 2200, 5, 7,  38, 120], [7, 1, 30, 600, 2.0, 1.5, 12, 30]),
@@ -184,73 +173,13 @@ def compute_stats(df: pd.DataFrame, labels, feature_cols: list) -> list[dict]:
     return stats
 
 
-# ── ai personas ───────────────────────────────────────────────────────────────
-
-_PERSONA_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "segment_name": {"type": "string"},
-        "demographics": {
-            "type": "object",
-            "properties": {
-                "age_range": {"type": "string"},
-                "income_level": {"type": "string"},
-                "lifestyle": {"type": "string"},
-            },
-            "required": ["age_range", "income_level", "lifestyle"],
-            "additionalProperties": False,
-        },
-        "psychographics": {
-            "type": "object",
-            "properties": {
-                "motivations": {"type": "array", "items": {"type": "string"}},
-                "pain_points": {"type": "array", "items": {"type": "string"}},
-                "values": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["motivations", "pain_points", "values"],
-            "additionalProperties": False,
-        },
-        "behavioral_patterns": {"type": "array", "items": {"type": "string"}},
-        "marketing_channels": {"type": "array", "items": {"type": "string"}},
-        "messaging_strategy": {"type": "string"},
-        "predicted_clv": {"type": "string", "enum": ["High", "Medium", "Low"]},
-        "campaign_recommendation": {"type": "string"},
-    },
-    "required": [
-        "segment_name", "demographics", "psychographics", "behavioral_patterns",
-        "marketing_channels", "messaging_strategy", "predicted_clv", "campaign_recommendation",
-    ],
-    "additionalProperties": False,
-}
-
-
-def generate_persona(
-    segment: dict,
-    all_segments: list[dict],
-    client: anthropic.Anthropic,
-    business_ctx: dict,
-) -> dict:
-    active_ctx = {k: v for k, v in business_ctx.items() if v}
-    biz_block = ("\n\nBusiness Context:\n" + json.dumps(active_ctx, indent=2)) if active_ctx else ""
-    prompt = (
-        f"Segment:\n{json.dumps(segment, indent=2)}\n\n"
-        "All segments (for comparison):\n"
-        + json.dumps(
-            [{"segment_id": s["segment_id"], "feature_means": s["feature_means"]} for s in all_segments],
-            indent=2,
-        )
-        + biz_block
-    )
-    resp = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        thinking={"type": "adaptive"},
-        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": prompt}],
-        output_config={"format": {"type": "json_schema", "schema": _PERSONA_SCHEMA}},
-    )
-    text = next(b.text for b in resp.content if b.type == "text")
-    return json.loads(text)
+@st.cache_data
+def load_personas(dataset_name: str) -> list[dict]:
+    fname = PERSONA_FILE.get(dataset_name)
+    if fname is None:
+        return []
+    with open(PERSONAS_DIR / fname, encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ── charts ────────────────────────────────────────────────────────────────────
@@ -331,40 +260,6 @@ with st.sidebar:
     st.caption("AI-powered customer segmentation with intelligent personas")
     st.divider()
 
-    with st.expander("Tell us about your business", expanded=False):
-        biz_type = st.text_input(
-            "Business type",
-            placeholder="e.g., Local coffee shop, Online boutique, SaaS startup",
-        )
-        age_col1, age_col2 = st.columns(2)
-        with age_col1:
-            age_min = st.number_input("Min age", min_value=13, max_value=100, value=18, step=1)
-        with age_col2:
-            age_max = st.number_input("Max age", min_value=13, max_value=100, value=65, step=1)
-        biz_goal = st.selectbox(
-            "Primary business goal",
-            [
-                "",
-                "Increase sales",
-                "Retain existing customers",
-                "Expand to new markets",
-                "Launch new product",
-                "Improve brand awareness",
-            ],
-        )
-        biz_budget = st.selectbox(
-            "Current marketing budget",
-            ["", "Under $1K/month", "$1K-$5K/month", "$5K-$20K/month", "$20K+/month"],
-        )
-
-    has_biz_context = bool(biz_type or biz_goal or biz_budget)
-    business_ctx = {
-        "business_type": biz_type or None,
-        "target_age_range": f"{age_min}–{age_max}" if has_biz_context else None,
-        "business_goal": biz_goal or None,
-        "marketing_budget": biz_budget or None,
-    }
-
     st.markdown("**Data Source**")
     dataset_choice = st.selectbox("Dataset", DATASET_OPTIONS, index=0, label_visibility="collapsed")
     if dataset_choice != "Upload My Own CSV":
@@ -376,18 +271,36 @@ with st.sidebar:
 
     n_clusters = st.slider("Number of Segments", min_value=2, max_value=10, value=4)
 
-    st.divider()
-    api_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        placeholder="sk-ant-...",
-        help="Required for AI persona generation.",
-    )
-
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 st.title("MarketMinds AI")
+
+# ── welcome ───────────────────────────────────────────────────────────────────
+
+with st.container(border=True):
+    st.markdown("#### How it works — 3 simple steps")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**1. Pick a dataset**")
+        st.markdown(
+            "Choose one of the three pre-built examples in the sidebar to explore real-looking "
+            "customer data — no upload needed. Or switch to 'Upload My Own CSV' to use your own."
+        )
+    with c2:
+        st.markdown("**2. Choose your segments**")
+        st.markdown(
+            "Use the 'Number of Segments' slider to decide how many customer groups to find. "
+            "Start with 4 — it usually reveals the most useful, distinct groups."
+        )
+    with c3:
+        st.markdown("**3. Get your insights**")
+        st.markdown(
+            "Scroll down past the charts and click **'Get My Customer Insights'** to see a "
+            "detailed profile for each customer group, including who they are and how to reach them."
+        )
+
+st.divider()
 
 # ── data loading ──────────────────────────────────────────────────────────────
 
@@ -458,97 +371,91 @@ st.dataframe(pd.DataFrame(rows).set_index("Segment"), use_container_width=True)
 st.divider()
 
 
-# ── ai personas ───────────────────────────────────────────────────────────────
+# ── customer insights ─────────────────────────────────────────────────────────
 
-st.subheader("AI-Powered Persona Descriptions")
+st.subheader("Customer Insights")
 
-CLV_BADGE = {"High": "🟢 High", "Medium": "🟡 Medium", "Low": "🔴 Low"}
-
-if not api_key:
-    st.warning("Enter an Anthropic API key in the sidebar to generate persona descriptions.")
+if dataset_choice == "Upload My Own CSV":
+    st.info(
+        "Custom data uploads show segmentation analysis only. "
+        "AI-generated personas are available for the three pre-built datasets."
+    )
 else:
-    biz_str = json.dumps({k: v for k, v in business_ctx.items() if v}, sort_keys=True)
-    cache_key = f"personas|{data_id}|{n_clusters}|{biz_str}"
-
+    cache_key = f"insights|{data_id}"
     if cache_key not in st.session_state:
         st.session_state[cache_key] = None
 
     if st.session_state[cache_key] is None:
-        if st.button("Generate Personas", type="primary"):
-            try:
-                client = anthropic.Anthropic(api_key=api_key)
-                result = {}
-                bar = st.progress(0, text="Generating personas...")
-                for i, seg in enumerate(segments):
-                    result[seg["segment_id"]] = generate_persona(seg, segments, client, business_ctx)
-                    bar.progress((i + 1) / len(segments), text=f"Segment {i + 1} of {len(segments)} done")
-                st.session_state[cache_key] = result
-                st.rerun()
-            except anthropic.AuthenticationError:
-                st.error("Invalid API key. Check the key entered in the sidebar.")
-            except anthropic.RateLimitError:
-                st.error("Rate limit reached. Wait a moment and try again.")
-            except anthropic.APIStatusError as e:
-                st.error(f"API error {e.status_code}: {e.message}")
+        if st.button("Get My Customer Insights", type="primary"):
+            st.session_state[cache_key] = load_personas(dataset_choice)
+            st.rerun()
 
     if st.session_state.get(cache_key):
         personas = st.session_state[cache_key]
 
         header_col, btn_col = st.columns([5, 1])
         with btn_col:
-            if st.button("Regenerate", type="secondary"):
+            if st.button("Reset", type="secondary"):
                 st.session_state[cache_key] = None
                 st.rerun()
 
         n_cols = min(n_clusters, 2)
         cols = st.columns(n_cols)
         for i, seg in enumerate(segments):
-            p = personas.get(seg["segment_id"], {})
+            p = personas[seg["segment_id"] % len(personas)]
             with cols[i % n_cols]:
                 with st.container(border=True):
                     st.markdown(
                         f"**Segment {seg['segment_id']}** &nbsp;·&nbsp; "
                         f"{seg['size']} customers ({seg['percentage']}%)"
                     )
+
+                    # Who They Are
                     st.markdown(f"### {p.get('segment_name', 'Segment ' + str(seg['segment_id']))}")
 
-                    clv = p.get("predicted_clv", "")
-                    if clv:
-                        st.markdown(f"**Predicted CLV:** {CLV_BADGE.get(clv, clv)}")
+                    # Business Value to You
+                    clv_raw = p.get("predicted_clv", "")
+                    if clv_raw:
+                        parts = clv_raw.split("—", 1)
+                        clv_level = parts[0].strip()
+                        clv_reason = parts[1].strip() if len(parts) > 1 else ""
+                        badge = CLV_BADGE.get(clv_level, clv_level)
+                        clv_line = f"**Business Value to You:** {badge}"
+                        if clv_reason:
+                            clv_line += f" — {clv_reason}"
+                        st.markdown(clv_line)
 
-                    demo = p.get("demographics", {})
-                    if demo:
-                        st.markdown(
-                            f"**Demographics:** {demo.get('age_range', '')} · "
-                            f"{demo.get('income_level', '')} · {demo.get('lifestyle', '')}"
+                    # Basic Info
+                    if p.get("demographics"):
+                        st.markdown("**Basic Info**")
+                        st.markdown(p["demographics"])
+
+                    # What Drives Them
+                    if p.get("psychographics"):
+                        st.markdown("**What Drives Them**")
+                        st.markdown(p["psychographics"])
+
+                    # How They Shop
+                    if p.get("behavioral_patterns"):
+                        st.markdown("**How They Shop**")
+                        st.markdown(p["behavioral_patterns"])
+
+                    # Where to Find Them
+                    if p.get("marketing_channels"):
+                        st.markdown("**Where to Find Them**")
+                        st.markdown(p["marketing_channels"])
+
+                    # What to Say to Them
+                    if p.get("messaging_strategy"):
+                        st.info("**What to Say to Them** — " + p["messaging_strategy"])
+
+                    # A Marketing Idea That Would Work
+                    if p.get("campaign_recommendation"):
+                        st.success(
+                            "**A Marketing Idea That Would Work** — " + p["campaign_recommendation"]
                         )
 
-                    psych = p.get("psychographics", {})
-                    if psych:
-                        m_col, pp_col = st.columns(2)
-                        with m_col:
-                            if psych.get("motivations"):
-                                st.markdown("**Motivations**")
-                                for item in psych["motivations"]:
-                                    st.markdown(f"- {item}")
-                        with pp_col:
-                            if psych.get("pain_points"):
-                                st.markdown("**Pain Points**")
-                                for item in psych["pain_points"]:
-                                    st.markdown(f"- {item}")
-                        if psych.get("values"):
-                            st.markdown("**Values:** " + " · ".join(psych["values"]))
+# ── footer ────────────────────────────────────────────────────────────────────
 
-                    if p.get("behavioral_patterns"):
-                        st.markdown("**Behavioral Patterns**")
-                        for item in p["behavioral_patterns"]:
-                            st.markdown(f"- {item}")
-
-                    if p.get("marketing_channels"):
-                        st.markdown("**Marketing Channels:** " + " · ".join(p["marketing_channels"]))
-
-                    if p.get("messaging_strategy"):
-                        st.info(p["messaging_strategy"])
-
-                    if p.get("campaign_recommendation"):
-                        st.success(p["campaign_recommendation"])
+st.divider()
+st.caption("Free demo — no sign-up required. Built by Melina Soto.")
